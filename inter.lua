@@ -13,35 +13,33 @@ local dumppath="/tmp/nms/dumprows"
 
 function dump_usage()
 	local ostime=os.time(os.date("!*t"))
-	local users_str = read_exec(string.format([[cipgwcli list]]))
+	local users_str = read_exec(string.format([[cipgwcli dump]]))
 	local rows = string.split(users_str, "\n")
 	local fp = io.open(dumppath, 'wb')
 	fp:write("begin transaction;\n")
 	for _, v in pairs(rows) do
 		local data = string.split(v, ",")
-		-- data[1] name
-		-- data[2] mac
-		-- data[5] session
-		-- data[9] tx
-		-- data[10] rx
-		-- data[11] login_time , use it with session_time
-		data[11]=ostime-data[5]
-		fp:write("insert into rawacct (user_mac, login_time, update_time, type, tx, rx, others) values ('"..data[2].."',"..data[11]..","..ostime..", 3, "..data[9]..", "..data[10]..", '');\n")
+		-- data[1] mac
+		-- data[2] login_time
+		-- data[3] session
+		-- data[4] tx
+		-- data[5] rx
+		fp:write("insert into rawacct (user_mac, login_time, session_time, type, tx, rx, others) values ('"..data[1].."',"..data[2]..","..data[3]..", 3, "..data[4]..", "..data[5]..", '');\n")
 	end
         fp:write("commit;\n")
 	fp.close()
-	
+
 	read_exec(string.format([[sqlite -init /tmp/timeout.sql %s < %s >/dev/null 2>&1]], rawdbpath, dumppath))
-	
+
 end
 
 function query_from_raw()
-	local file = assert(io.popen('sqlite -init /tmp/timeout.sql /tmp/rawdb.db "select * from rawacct order by user_mac, login_time, update_time asc" </dev/null','r'))
-	local output = file:read('*all')
-	file:close()
+	local output = read_exec(string.format([[sqlite -init /tmp/timeout.sql %s "select * from rawacct order by user_mac, login_time, session_time asc" </dev/null]], rawdbpath))
 	print(output)
 end
 
-dump_usage()
+--dump_usage()
+
+query_from_raw()
 
 
