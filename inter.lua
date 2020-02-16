@@ -11,9 +11,7 @@ local cjson = require("cjson")
 --local rawdbpath="/tmp/nms/rawdb.db"
 local srcdb="/tmp/nms/rawdb.db"
 local targetdb="/tmp/nms/operate.db"
-
-local update_list = {}
-local users = {}
+local dumppath="/tmp/nms/dumprows"
 
 local nms_enable = read_file("/db/capwap_wtp/capwap_status")
 if nms_enable ~= "Enabled" then
@@ -30,6 +28,9 @@ if ha_enable == "Enabled" then
 end
 
 local nms_ip = string.trim(read_file("/db/capwap_wtp/ac_cluster_ip"))
+local update_list = {}
+local users = {}
+local map_rss = {}
 
 function webpush(path, value, keep)
     write_file("/tmp/nms/" .. path, value)
@@ -41,8 +42,22 @@ function webpush(path, value, keep)
     end
 end
 
+
+function get_map_of_rssi ()
+	local users_str = read_exec(string.format([[sqlite --init /tmp/timeout.sql /etc/od_emcd/db/dev_all.db "attach database '%s' as aa; attach database '/db/od_emcd/ems.db' as bb; select station_info.mac, device.mac, rss from station_info inner join bb.device where station_info.dev_id=device.dev_id and station_info.mac in (select distinct(user_mac) from aa.rawacct)" </dev/null]], targetdb))
+    local row = string.split(users_str, "\n")
+    for _, v in pairs(row) do
+        local data = string.split(v, "|")
+        local mac = data[1]
+
+ 		if map_rss[mac] == nil then map_rss[mac] = {} end
+
+ 		map_rss[mac].apmac = data[2]
+ 		map_rss[mac].rss = data[3]
+    end
+end
+
 function prepare_database()
-	local dumppath="/tmp/nms/dumprows"
 	local users_str = read_exec(string.format([[cipgwcli dump]]))
 	local rows = string.split(users_str, "\n")
 
@@ -59,6 +74,9 @@ function prepare_database()
 
 	read_exec(string.format([[rm -f %s; sqlite -init /tmp/timeout.sql %s '.clone %s' </dev/null]], targetdb, srcdb, targetdb))
 
+	-- delete entry from srcdb
+	read_exec(string.format([[sqlite -init /tmp/timeout.sql %s "attach database '%s' as aa; delete from rawacct where rowid in (select rowid from aa.rawacct);"]], srcdb, targetdb))
+
 	read_exec(string.format([[sqlite -init /tmp/timeout.sql %s < %s]], targetdb, dumppath))
 
 end
@@ -70,6 +88,12 @@ function createupdate(mac, apmac, ut, tx1, rx1, tx2, rx2)
 	v.ut = ut
 	v.tx = tx2 - tx1
 	v.rx = rx2 - rx1
+	if map_rss[mac] ~= nil then
+		v.rss = map_rss[mac].rss
+		if apmac == nil or apmap == "" then
+			v.apmac = map_rss[mac].apmac
+		end
+	end
 	return v
 end
 
@@ -86,7 +110,6 @@ function cal_useage()
 	local rows = string.split(output, "\n")
 
 	for _, v in pairs(rows) do
-		print(v)
 		local cur_row = string.split(v, "|")
 		local mac = cur_row[1]
 		local lt = cur_row[2]
@@ -158,19 +181,32 @@ end
 
 prepare_database()
 
+get_map_of_rssi()
+
 cal_useage()
 
 print("=== update users status back to /tmp/nms/rawdb.db and update current users status to NMS ===")
+
+local fp = io.open(dumppath, 'wb')
+fp:write("begin transaction;\n")
 for _, v in pairs(users) do
-	print(inspect(v))
+	if v.status == STATUS_ONLINE then
+		if v.apmac == nil or v.apmac == "" then
+			if map_rss[mac] ~= nil then
+				v.apmac = map_rss[mac].apmac
+			end
+		end
+		fp:write("insert into rawacct (user_mac, login_time, session_time, type, tx, rx, others) values ('"..v.mac.."',"..v.lt..","..v.st..","..v.mode..", "..v.tx..", "..v.rx..",'"..v.apmac.."');\n")
+	else
+		users[_] = nil
+	end
 end
-
--- webpubsh("report_current", )
-
+fp:write("commit;\n")
+fp.close()
+read_exec(string.format([[sqlite -init /tmp/timeout.sql %s < %s]], srcdb, dumppath))
 print("=== prepare update entry and update to NMS ===")
-print(inspect(cjson.encode(update_list)))
+
 webpush("report_recently", cjson.encode(update_list), 1)
 
-
-
+webpush("report_current", cjson.encode(users), 0)
 
